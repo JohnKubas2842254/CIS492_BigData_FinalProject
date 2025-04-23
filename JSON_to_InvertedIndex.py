@@ -50,6 +50,7 @@ cursor.execute("USE BigData_FinalProject")
 
 cursor.execute("DROP TABLE IF EXISTS Posting")
 cursor.execute("DROP TABLE IF EXISTS Dictionary")
+cursor.execute("DROP TABLE IF EXISTS IndexMetadata")
 
 # Create MySQL tables
 cursor.execute("""
@@ -69,6 +70,13 @@ CREATE TABLE IF NOT EXISTS Posting (
     FOREIGN KEY (Term) REFERENCES Dictionary(Term) ON DELETE CASCADE 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 """) # Added Foreign Key and ENGINE/COLLATE
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS IndexMetadata (
+    KeyName VARCHAR(50) PRIMARY KEY,
+    Value BIGINT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+""")
 
 def nlp_pipeline(text):
     """
@@ -195,6 +203,7 @@ if __name__ == "__main__":
         postings = defaultdict(list) # Term -> [(DocID, Term_Freq), ...]
         doc_freq = defaultdict(int)       # Term -> TotalDocsFreq
         collection_freq = defaultdict(int) # Term -> TotalCollectionFreq
+        all_processed_doc_ids = set() # Set to store unique DocIDs processed
 
         print("Processing articles...")
         processed_count = 0
@@ -206,6 +215,8 @@ if __name__ == "__main__":
             if not doc_id or not text:
                 print(f"Skipping article due to missing ID or text: {article.get('title', 'N/A')}")
                 continue
+
+            all_processed_doc_ids.add(doc_id)
 
             # Process text using the NLP pipeline
             nlp_results = nlp_pipeline(text)
@@ -238,6 +249,7 @@ if __name__ == "__main__":
             # --- End Example ---
 
             if not tokens_for_index: # Skip if no tokens resulted after processing
+                processed_count += 1
                 continue
 
             # Calculate term frequencies for the current document
@@ -253,9 +265,12 @@ if __name__ == "__main__":
             if processed_count % 100 == 0: # Print progress update
                  print(f"  Processed {processed_count}/{len(articles)} articles...")
 
-        #print(f"Finished processing {processed_count} articles.")
+        print(f"Finished processing {processed_count} articles.")
         initial_term_count = len(postings)
         print(f"Found {initial_term_count} unique terms initially.")
+        total_docs_processed = len(all_processed_doc_ids) # Calculate N
+        print(f"Total unique documents processed (N): {total_docs_processed}")
+
 
         # --- Minimum Document Frequency Filtering ---
         min_doc_freq_threshold = 2
@@ -284,9 +299,16 @@ if __name__ == "__main__":
             print("  Clearing existing Dictionary and Posting tables...")
             cursor.execute("DELETE FROM Posting")
             cursor.execute("DELETE FROM Dictionary")
+            cursor.execute("DELETE FROM IndexMetadata")
             db.commit()
             print("  Tables cleared.")
-
+            
+            # Insert total document count into IndexMetadata
+            meta_sql = "INSERT INTO IndexMetadata (KeyName, Value) VALUES (%s, %s)"
+            cursor.execute(meta_sql, ('TotalDocuments', total_docs_processed))
+            db.commit()
+            print(f"  Stored TotalDocuments = {total_docs_processed} in IndexMetadata.")
+        
             # Insert into Dictionary table
             dict_data = []
             for term in filtered_postings.keys():

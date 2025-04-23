@@ -12,9 +12,9 @@ from nltk.util import ngrams # type: ignore
 # --- Database Configuration ---
 DB_CONFIG = {
     "host": "localhost",
-    "user": "root", # Replace with your MySQL username
-    "password": "2842254K", # Replace with your MySQL password
-    "database": "BigData_FinalProject", # The database created by the indexing script
+    "user": "root",
+    "password": "2842254K", 
+    "database": "BigData_FinalProject",
     "charset": "utf8mb4",
     "cursorclass": pymysql.cursors.DictCursor # Use DictCursor for easy row access
 }
@@ -102,20 +102,6 @@ def nlp_pipeline(text):
     }
 # --- End of NLP Pipeline ---
 
-
-def fetch_total_doc_count(cursor):
-    """Gets the total number of unique documents indexed."""
-    try:
-        # A more robust way might be to count distinct DocIDs in Posting
-        # or store this count separately after indexing.
-        # Let's try counting distinct DocIDs from Posting table.
-        cursor.execute("SELECT COUNT(DISTINCT DocID) as count FROM Posting")
-        result = cursor.fetchone()
-        return result['count'] if result and result['count'] > 0 else 1 # Avoid division by zero, assume 1 if empty
-    except pymysql.Error as e:
-        print(f"Error fetching document count: {e}")
-        return 1 # Default to 1 to avoid errors
-
 def search_documents(query_text, top_n=10):
     """
     Processes a query, calculates TF-IDF scores, and returns top N documents.
@@ -139,11 +125,20 @@ def search_documents(query_text, top_n=10):
         conn = pymysql.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # 2. Get total number of documents (N) for IDF calculation
-        total_docs_in_collection = fetch_total_doc_count(cursor)
+        # 2. Get total number of documents (N) from IndexMetadata table
+        cursor.execute("SELECT Value FROM IndexMetadata WHERE KeyName = 'TotalDocuments'")
+        result = cursor.fetchone()
+        if result and result['Value'] > 0:
+            total_docs_in_collection = result['Value']
+            print(f"Retrieved TotalDocuments (N) = {total_docs_in_collection}")
+        else:
+            print("Error: Could not retrieve TotalDocuments count from IndexMetadata. Aborting search.")
+            cursor.close()
+            conn.close()
+            return [] # Cannot proceed without N
+
         if total_docs_in_collection <= 1:
              print("Warning: Total document count is very low. IDF scores may not be meaningful.")
-
 
         # 3. Calculate scores for documents containing query terms
         for term in set(query_terms): # Use set to process each unique term once
@@ -179,7 +174,6 @@ def search_documents(query_text, top_n=10):
                     doc_scores[doc_id] += tf_weight * idf
             # else:
                 # print(f"  Term '{term}' not found in dictionary.")
-
 
         cursor.close()
         conn.close()
