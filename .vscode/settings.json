@@ -1,0 +1,19 @@
+{
+    "sqltools.connections": [
+        {
+            "mysqlOptions": {
+                "authProtocol": "default",
+                "enableSsl": "Disabled"
+            },
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 3306,
+            "driver": "MySQL",
+            "name": "BigData",
+            "database": "BigData_FinalProject",
+            "username": "root",
+            "password": "2842254K",
+            "connectionTimeout": 30
+        }
+    ]
+}
