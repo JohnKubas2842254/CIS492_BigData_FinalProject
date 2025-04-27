@@ -1,6 +1,7 @@
 import json
 import nltk #type: ignore
 import re
+import os
 from nltk.corpus import stopwords #type: ignore
 from nltk.stem import WordNetLemmatizer #type: ignore
 from nltk.util import ngrams #type: ignore
@@ -9,22 +10,26 @@ import pymysql #type: ignore
 import time
 
 # --- NLTK Data Download (Uncomment if needed) ---
-# try:
-#     nltk.data.find('corpora/wordnet')
-# except nltk.downloader.DownloadError:
-#     nltk.download('wordnet')
-# try:
-#     nltk.data.find('corpora/stopwords')
-# except nltk.downloader.DownloadError:
-#     nltk.download('stopwords')
-# try:
-#     nltk.data.find('tokenizers/punkt')
-# except nltk.downloader.DownloadError:
-#     nltk.download('punkt')
-# try:
-#     nltk.data.find('taggers/averaged_perceptron_tagger')
-# except nltk.downloader.DownloadError:
-#     nltk.download('averaged_perceptron_tagger')
+try:
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('wordnet')
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
+try:
+    nltk.data.find('punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    nltk.data.find('averaged_perceptron_tagger_eng')
+except LookupError:
+    nltk.download('averaged_perceptron_tagger_eng')
+try: 
+    nltk.data.find('punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab')
 # --- End NLTK Data Download ---
 
 # Initialize lemmatizer and stopwords list
@@ -187,178 +192,224 @@ def load_json_data(filepath):
         print(f"Error: Could not decode JSON from {filepath}")
         return None
 
-# --- Placeholder for NLP Pipeline Functions ---
-# We will add functions for tokenization, stop word removal, etc. here later.
+def insert_into_database(postings, doc_freq, collection_freq, all_processed_doc_ids, is_final_batch=False):
+    """
+    Insert processed data into MySQL database
+    
+    Args:
+        postings: Dictionary mapping terms to document frequency lists
+        doc_freq: Dictionary of document frequencies for each term
+        collection_freq: Dictionary of collection frequencies for each term
+        all_processed_doc_ids: Set of all document IDs processed
+        is_final_batch: Boolean indicating if this is the final batch
+    
+    Returns:
+        Tuple of (success_status, processed_docs_count)
+    """
+    try:
+        # Only clear tables on the first run
+        if is_final_batch:
+            print("  Updating metadata in the database...")
+            # Update total document count in IndexMetadata
+            meta_sql = "INSERT INTO IndexMetadata (KeyName, Value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE Value=VALUES(Value)"
+            cursor.execute(meta_sql, ('TotalDocuments', len(all_processed_doc_ids)))
+            db.commit()
+            print(f"  Updated TotalDocuments = {len(all_processed_doc_ids)} in IndexMetadata.")
+        
+        # Apply minimum document frequency filtering
+        min_doc_freq_threshold = 2
+        if not is_final_batch:
+            print(f"Applying Minimum Document Frequency filter (threshold = {min_doc_freq_threshold})...")
+        
+        # Filter terms
+        terms_to_keep = {term for term, freq in doc_freq.items() if freq >= min_doc_freq_threshold}
+        filtered_count = len(terms_to_keep)
+        total_count = len(doc_freq)
+        if not is_final_batch:
+            print(f"Keeping {filtered_count} terms after filtering (removed {total_count - filtered_count} terms).")
+        
+        # Insert into Dictionary table
+        dict_data = []
+        for term in terms_to_keep:
+            # Ensure term length doesn't exceed VARCHAR(255)
+            truncated_term = term[:255] 
+            dict_data.append((truncated_term, doc_freq[term], collection_freq[term]))
+        
+        if dict_data:
+            dict_sql = """
+                INSERT INTO Dictionary (Term, TotalDocsFreq, TotalCollectionFreq) 
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    TotalDocsFreq = TotalDocsFreq + VALUES(TotalDocsFreq),
+                    TotalCollectionFreq = TotalCollectionFreq + VALUES(TotalCollectionFreq)
+            """
+            cursor.executemany(dict_sql, dict_data)
+            db.commit()
+            print(f"  Inserted/Updated {len(dict_data)} terms in Dictionary.")
+        
+        # Insert into Posting table
+        posting_data = []
+        for term in terms_to_keep:
+            if term in postings:
+                truncated_term = term[:255]  # Use the same truncated term
+                for doc_id, freq in postings[term]:
+                    # Ensure doc_id length doesn't exceed VARCHAR(255)
+                    truncated_doc_id = doc_id[:255] 
+                    posting_data.append((truncated_term, truncated_doc_id, freq))
+        
+        # Consider batching for posting data
+        batch_size = 10000
+        inserted_postings = 0
+        
+        if posting_data:
+            posting_sql = """
+                INSERT INTO Posting (Term, DocID, Term_Freq) 
+                VALUES (%s, %s, %s) 
+                ON DUPLICATE KEY UPDATE Term_Freq = Term_Freq + VALUES(Term_Freq)
+            """
+            
+            for i in range(0, len(posting_data), batch_size):
+                batch = posting_data[i:i + batch_size]
+                cursor.executemany(posting_sql, batch)
+                inserted_postings += len(batch)
+                db.commit()  # Commit each batch
+                print(f"    Inserted batch {i//batch_size + 1}, total postings in this update: {inserted_postings}")
+        
+            print(f"  Inserted {inserted_postings} entries into Posting.")
+        
+        return True, len(all_processed_doc_ids)
+    
+    except pymysql.Error as e:
+        print(f"Database Error: {e}")
+        db.rollback()
+        return False, 0
 
 # --- Main execution ---
 if __name__ == "__main__":
     start_time = time.time()
-    json_file_path = '/Users/kube/VSprojects/CIS492_BigData_FinalProject/enwiki20201020/0b8a29b0-177a-4103-b124-18a145f0a564.json'
-    articles = load_json_data(json_file_path)
-
-    if articles:
-        print(f"Successfully loaded {len(articles)} articles from {json_file_path}")
-
-        # In-memory structures for the inverted index
-        postings = defaultdict(list) # Term -> [(DocID, Term_Freq), ...]
-        doc_freq = defaultdict(int)       # Term -> TotalDocsFreq
-        collection_freq = defaultdict(int) # Term -> TotalCollectionFreq
-        all_processed_doc_ids = set() # Set to store unique DocIDs processed
-
-        print("Processing articles...")
-        processed_count = 0
-        for article in articles:
-            doc_id = article.get('id')
-            text = article.get('text')
-            title = article.get('title', 'N/A')
-
-            if not doc_id or not text:
-                print(f"Skipping article due to missing ID or text: {article.get('title', 'N/A')}")
-                continue
-
-            all_processed_doc_ids.add(doc_id)
-
-            # Process text using the NLP pipeline
-            nlp_results = nlp_pipeline(text)
-            tokens_for_index = nlp_results['tokens'] # Get the list of words for indexing
-            pos_tags = nlp_results['pos_tags']
-            # ner_tree = nlp_results['ner_tree']
-
-            # # --- Example: Print NER results for the first article ---
-            # if processed_count == 0 and nlp_results['ner_tree']:
-            #      print(f"\n--- NER Tree for first article () ---")
-            #      print("Named Entities Found:")
-            #      for chunk in nlp_results['ner_tree']:
-            #          if hasattr(chunk, 'label'):
-            #              entity_label = chunk.label()
-            #              entity_text = ' '.join(c[0] for c in chunk.leaves())
-            #              print(f'  {entity_label}: {entity_text}')
-            #      print("-------------------------------------------\n")
-            # # --- End Example ---
-
-
-            # --- Example: Print POS tags and Tokens for the first article ---
-            if processed_count == 0:
-                 print(f"\n--- POS Tags for first article ('{title}') ---")
-                 print(pos_tags[:30])
-                 print("-------------------------------------------\n")
-                 print(f"\n--- Tokens (Unigrams+Ngrams) for first article ('{title}') ---")
-                 # Print first ~50 tokens as example
-                 print(sorted(tokens_for_index)[:50]) # Sort for easier viewing
-                 print("-------------------------------------------\n")
-            # --- End Example ---
-
-            if not tokens_for_index: # Skip if no tokens resulted after processing
-                processed_count += 1
-                continue
-
-            # Calculate term frequencies for the current document
-            term_counts = Counter(tokens_for_index)
-
-            # Update the in-memory index
-            for term, freq in term_counts.items():
-                postings[term].append((doc_id, freq))
-                doc_freq[term] += 1 # Increment document frequency for the term
-                collection_freq[term] += freq # Add to total collection frequency
-
-            processed_count += 1
-            if processed_count % 100 == 0: # Print progress update
-                 print(f"  Processed {processed_count}/{len(articles)} articles...")
-
-        print(f"Finished processing {processed_count} articles.")
-        initial_term_count = len(postings)
-        print(f"Found {initial_term_count} unique terms initially.")
-        total_docs_processed = len(all_processed_doc_ids) # Calculate N
-        print(f"Total unique documents processed (N): {total_docs_processed}")
-
-
-        # --- Minimum Document Frequency Filtering ---
-        min_doc_freq_threshold = 2
-        print(f"Applying Minimum Document Frequency filter (threshold = {min_doc_freq_threshold})...")
-
-        # Create new dictionaries to hold the filtered data
-        filtered_postings = {}
-        filtered_doc_freq = {}
-        filtered_collection_freq = {}
-
-        terms_to_keep = {term for term, freq in doc_freq.items() if freq >= min_doc_freq_threshold}
-
-        # Populate filtered dictionaries
-        for term in terms_to_keep:
-            filtered_postings[term] = postings[term]
-            filtered_doc_freq[term] = doc_freq[term]
-            filtered_collection_freq[term] = collection_freq[term]
-
-        filtered_term_count = len(filtered_postings)
-        print(f"Kept {filtered_term_count} terms after filtering (removed {initial_term_count - filtered_term_count} terms).")
-
-        # --- Database Insertion ---
-        print("Inserting filtered data into MySQL...")
-        try:
-            # Clear existing tables
-            print("  Clearing existing Dictionary and Posting tables...")
-            cursor.execute("DELETE FROM Posting")
-            cursor.execute("DELETE FROM Dictionary")
-            cursor.execute("DELETE FROM IndexMetadata")
-            db.commit()
-            print("  Tables cleared.")
-            
-            # Insert total document count into IndexMetadata
-            meta_sql = "INSERT INTO IndexMetadata (KeyName, Value) VALUES (%s, %s)"
-            cursor.execute(meta_sql, ('TotalDocuments', total_docs_processed))
-            db.commit()
-            print(f"  Stored TotalDocuments = {total_docs_processed} in IndexMetadata.")
-        
-            # Insert into Dictionary table
-            dict_data = []
-            for term in filtered_postings.keys():
-                 # Ensure term length doesn't exceed VARCHAR(255)
-                 truncated_term = term[:255] 
-                 dict_data.append((truncated_term, doc_freq[term], collection_freq[term]))
-
-            dict_sql = "INSERT INTO Dictionary (Term, TotalDocsFreq, TotalCollectionFreq) VALUES (%s, %s, %s)"
-            cursor.executemany(dict_sql, dict_data)
-            db.commit()
-            print(f"  Inserted {len(dict_data)} terms into Dictionary.")
-            #print(f"  Inserted/Updated {len(dict_data)} terms in Dictionary.")
-
-            # Insert into Posting table
-            posting_data = []
-            for term, doc_list in filtered_postings.items():
-                truncated_term = term[:255] # Use the same truncated term
-                for doc_id, freq in doc_list:
-                    # Ensure doc_id length doesn't exceed VARCHAR(255)
-                    truncated_doc_id = doc_id[:255] 
-                    posting_data.append((truncated_term, truncated_doc_id, freq))
-
-            # Consider batching if posting_data is very large
-            batch_size = 10000 
-            posting_sql = "INSERT INTO Posting (Term, DocID, Term_Freq) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE Term_Freq=VALUES(Term_Freq)" # Or handle duplicates as needed
-            
-            inserted_postings = 0
-            for i in range(0, len(posting_data), batch_size):
-                batch = posting_data[i:i + batch_size]
-                rows_affected = cursor.executemany(posting_sql, batch)
-                inserted_postings += cursor.executemany(posting_sql, batch)
-                db.commit() # Commit each batch
-                print(f"    Inserted batch {i//batch_size + 1}, total postings: {inserted_postings}")
-
-            print(f"  Inserted {inserted_postings} entries into Posting.")
-
-            # Final commit (may not be strictly necessary if committing batches)
-            db.commit()
-            print("Database insertion complete.")
-
-        except pymysql.Error as e:
-            print(f"Database Error: {e}")
+    
+    # Specify the directory containing JSON files
+    json_directory = r'C:\Users\swoos\OneDrive\Documents\GitHub\CIS492_BigData_FinalProject\enwiki20201020'
+    
+    # Clear existing tables once at the beginning
+    try:
+        print("Initializing database tables...")
+        cursor.execute("DELETE FROM Posting")
+        cursor.execute("DELETE FROM Dictionary")
+        cursor.execute("DELETE FROM IndexMetadata")
+        db.commit()
+        print("Tables cleared and ready for new data.")
+    except pymysql.Error as e:
+        print(f"Database Error during initialization: {e}")
+        if 'db' in locals() and db.open:
             db.rollback()
-        finally:
-            if 'db' in locals() and db.open:
-                 cursor.close()
-                 db.close()
-                 print("Database connection closed.")
-    else:
-        print("Failed to load articles.")
-
+            cursor.close()
+            db.close()
+        exit(1)
+    
+    # Set for tracking all unique doc IDs across all files
+    all_processed_doc_ids = set()
+    total_files = 0
+    processed_files = 0
+    total_articles = 0
+    
+    print(f"Scanning directory: {json_directory}")
+    json_files = [f for f in os.listdir(json_directory) if f.endswith('.json')]
+    total_files = len(json_files)
+    print(f"Found {total_files} JSON files to process.")
+    
+    # Process each file individually and update database after each
+    for json_filename in json_files:
+        # Reset in-memory structures for each file
+        postings = defaultdict(list)
+        doc_freq = defaultdict(int)
+        collection_freq = defaultdict(int)
+        file_processed_doc_ids = set()
+        
+        json_file_path = os.path.join(json_directory, json_filename)
+        print(f"\nProcessing file {processed_files + 1}/{total_files}: {json_filename}")
+        
+        articles = load_json_data(json_file_path)
+        
+        if articles:
+            print(f"Successfully loaded {len(articles)} articles from {json_filename}")
+            file_article_count = len(articles)
+            total_articles += file_article_count
+            
+            print("Processing articles...")
+            processed_count = 0
+            for article in articles:
+                doc_id = article.get('id')
+                text = article.get('text')
+                title = article.get('title', 'N/A')
+                
+                if not doc_id or not text:
+                    print(f"Skipping article due to missing ID or text: {article.get('title', 'N/A')}")
+                    continue
+                
+                file_processed_doc_ids.add(doc_id)
+                all_processed_doc_ids.add(doc_id)
+                
+                # Process text using the NLP pipeline
+                nlp_results = nlp_pipeline(text)
+                tokens_for_index = nlp_results['tokens']
+                pos_tags = nlp_results['pos_tags']
+                
+                # Show example for the very first article only
+                if processed_files == 0 and processed_count == 0:
+                    print(f"\n--- POS Tags for first article ('{title}') ---")
+                    print(pos_tags[:30])
+                    print("-------------------------------------------\n")
+                    print(f"\n--- Tokens (Unigrams+Ngrams) for first article ('{title}') ---")
+                    print(sorted(tokens_for_index)[:50])
+                    print("-------------------------------------------\n")
+                
+                if not tokens_for_index:
+                    processed_count += 1
+                    continue
+                
+                # Calculate term frequencies for this document
+                term_counts = Counter(tokens_for_index)
+                
+                # Update the in-memory index for this file
+                for term, freq in term_counts.items():
+                    postings[term].append((doc_id, freq))
+                    doc_freq[term] += 1
+                    collection_freq[term] += freq
+                
+                processed_count += 1
+                if processed_count % 100 == 0:
+                    print(f"  Processed {processed_count}/{file_article_count} articles...")
+            
+            print(f"Finished processing {processed_count} articles from {json_filename}")
+            
+            # After processing the file, insert data into the database
+            print(f"Inserting data from {json_filename} into database...")
+            success, _ = insert_into_database(postings, doc_freq, collection_freq, file_processed_doc_ids)
+            
+            if success:
+                processed_files += 1
+                print(f"Successfully updated database with data from {json_filename}")
+            else:
+                print(f"Failed to update database with data from {json_filename}")
+        else:
+            print(f"Failed to load articles from {json_filename}")
+    
+    # Final update to ensure metadata is correct
+    print("\nPerforming final database update...")
+    insert_into_database({}, {}, {}, all_processed_doc_ids, is_final_batch=True)
+    
+    # Processing summary
+    print("\n--- Processing Summary ---")
+    print(f"Processed {processed_files}/{total_files} JSON files.")
+    print(f"Total articles processed: {total_articles}")
+    print(f"Total unique documents processed (N): {len(all_processed_doc_ids)}")
+    
+    # Close database connection
+    if 'db' in locals() and db.open:
+        cursor.close()
+        db.close()
+        print("Database connection closed.")
+    
     end_time = time.time()
     print(f"Total execution time: {end_time - start_time:.2f} seconds")

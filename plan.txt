@@ -1,0 +1,15 @@
+Let's start over with the entire workspace. 
+
+The overall goal of the project is to build an intelligent WIkipedia search engine using NLP and other searchh engine/AI principles.
+
+This file is a full size wikipedia data dump in xml form (currently compressed) I could un-compress the file and parse it there or just parse it in chunks, (I have a powerful computer). I need to extract some (or all) pages from it such that I can use their contents in the following process
+
+1. Parse the data dump, extracting title, category tags, and body text to be stored in their own document
+
+2. Put each document's body text through an NLP pipeline utilizing sto pword removal, tokenization, lemmatization, NER, and POS
+
+3. Establish an inverted index in sql tables with the following schema:
+Dictionary table (Term, TotalDocsFreq, TotalCollectionFreq) and
+Posting table (Term, DocID Term_Freq)
+
+4. TF-IDF calculation to create a document term matrix/table such that we can later query the data base and compute the cosine similarity between the query and the document to retrieve relevant documents
